@@ -36,12 +36,26 @@
 
 ## 构建与运行
 
-### 运行
+### 第一步：获取扩展
 
-1. 下载本仓库对应的解包版应用（含 `TurboWarp.exe` 与修改后的 `resources/app.asar`）
-2. 双击 `TurboWarp.exe` 启动，无需安装
-3. 通过「自定义扩展」面板加载 `extensions/enhanced-music.js`
-4. 拖出 `演奏音符` 积木，点击 NOTE 参数钢琴键盘即可试听内置钢琴音色
+「增强音乐」扩展**不内置在应用中**（原因见[为什么需要搭配本版本使用](#为什么需要搭配本版本使用)），需手动加载：
+
+- 仓库内文件：`extensions/enhanced-music.js`
+- 或 [Release 资产](https://github.com/Xiao-Feng233/TurboWarp-Music-Enhanced/releases/latest) 直接下载 `enhanced-music.js`（约 2.7MB，含内嵌钢琴采样）
+
+### 第二步：运行与加载
+
+1. 下载解包版应用（[Release 资产](https://github.com/Xiao-Feng233/TurboWarp-Music-Enhanced/releases/latest) 中 `TurboWarp-Music-Enhanced-unpacked.zip`，约 415MB）
+2. 解压后双击 `TurboWarp.exe` 启动，无需安装
+3. 积木区 → 底部「自定义扩展」→ 打开 `enhanced-music.js`，全选复制内容 → 粘贴 → 加载
+4. 积木区出现「增强音乐」分类（17 积木）
+
+### 第三步：开始演奏
+
+1. 拖出 `演奏音符` 积木，点击 NOTE 参数钢琴键盘试听（内置钢琴音色自动加载）
+2. 想要更多音色：按[自定义采样规范](#自定义采样规范)加载文件夹
+
+> 提示：扩展与自定义采样一致，每次启动应用后需重新加载一次。
 
 ### 从原版构建（可选）
 
@@ -137,7 +151,7 @@
 
 其余文件保持原版 v1.15.2 不变。
 
-> ⚠️ **维护状态声明**：内置「节奏鼓组」扩展（`rhythm-drum.js`）为早期开发产物，**未经完整维护与测试**，可能存在功能缺陷，请谨慎使用。核心功能请以「增强音乐」扩展（`extensions/enhanced-music.js`）为准。
+> ⚠️ **维护状态声明**：「增强音乐」扩展中的**鼓组部分**（`演奏拍鼓` 积木及 `加载鼓组音色`）为早期开发产物，**未经完整维护与测试**，可能存在功能缺陷，请谨慎使用。旋律演奏、延音踏板、刮奏等功能可放心使用。
 
 ## 为什么需要搭配本版本使用
 
@@ -162,23 +176,21 @@
 
 ## 📥 下载
 
-### 解包版应用
+所有文件均可从 [Releases 页面](https://github.com/Xiao-Feng233/TurboWarp-Music-Enhanced/releases/latest) 获取：
 
-| 文件 | 说明 |
+| 资产 | 说明 |
 |------|------|
-| [TurboWarp-Music-Enhanced-解包版.zip](https://github.com/Xiao-Feng233/TurboWarp-Music-Enhanced/releases/latest) | 完整解包版应用（约 415MB）：含修改后的 `app.asar`，解压后双击 `TurboWarp.exe` 即可使用，无需安装 |
+| `TurboWarp-Music-Enhanced-unpacked.zip` | 解包版应用（约 415MB）：含修改后的 `app.asar`，解压后双击 `TurboWarp.exe` 即可使用，无需安装 |
+| `enhanced-music.js` | 「增强音乐」扩展（约 2.7MB，含内嵌钢琴采样），通过自定义扩展面板加载 |
+| `Bocchi-the-Rock-ED.sb3` | up主视频内开源作品「吉他与孤独与蓝色星球」（孤独摇滚 ED） |
 
-### 开源作品
-
-| 文件 | 说明 |
-|------|------|
-| [Blue-Planet.sb3](https://github.com/Xiao-Feng233/TurboWarp-Music-Enhanced/releases/latest) | up主视频内开源作品「吉他与孤独与蓝色星球」，随 Release 提供下载（仓库内 [projects/「吉他与孤独与蓝色星球」.sb3](projects/「吉他与孤独与蓝色星球」.sb3) 亦可直接获取） |
+仓库内亦可直接获取：[projects/「吉他与孤独与蓝色星球」.sb3](projects/「吉他与孤独与蓝色星球」.sb3)、[extensions/enhanced-music.js](extensions/enhanced-music.js)。
 
 ---
 
 ## 作品声明
 
-up主视频内作品已开源：「吉他与孤独与蓝色星球」。
+up主视频内作品已开源：「吉他与孤独与蓝色星球」（孤独摇滚 ED）。
 请在仓库内下载（[跳转位置](projects/「吉他与孤独与蓝色星球」.sb3)）。
 **未经 up 允许，不得搬运、二次分发，仅供作品参考展示。**
 
