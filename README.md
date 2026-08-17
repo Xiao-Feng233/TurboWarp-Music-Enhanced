@@ -47,8 +47,10 @@
 
 1. 下载解包版应用（[Release 资产](https://github.com/Xiao-Feng233/TurboWarp-Music-Enhanced/releases/latest) 中 `TurboWarp-Music-Enhanced-unpacked.zip`，约 415MB）
 2. 解压后双击 `TurboWarp.exe` 启动，无需安装
-3. 积木区 → 底部「自定义扩展」→ 打开 `enhanced-music.js`，全选复制内容 → 粘贴 → 加载
-4. 积木区出现「增强音乐」分类（17 积木）
+3. 点击**页面左下角「扩展」**按钮 → 选择「自定义扩展」
+4. 在自定义扩展面板中**勾选「以非沙盒模式运行」**（必须勾选，否则无法读取本地文件）
+5. **直接选取文件**：选择已下载的 `enhanced-music.js` 文件 → 加载
+6. 积木区出现「增强音乐」分类（17 积木）
 
 ### 第三步：开始演奏
 
