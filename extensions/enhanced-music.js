@@ -33,6 +33,9 @@ var EMBEDDED_SAMPLES = {
       this.activeNotes = new Map();
       this.sustainedNotes = [];
       this.nextNoteId = 0;
+      this._autoCycleTimer = null;
+      this._stopHookInstalled = false;
+      this._schedLead = 0.05;   // 音频网格前瞻量（秒）：脚本比音频提前运行的时间
       this.melodyPackName = '内置钢琴';
       this.drumPackName = '未加载';
       this.melodyLoaded = false;
@@ -45,12 +48,6 @@ var EMBEDDED_SAMPLES = {
         '(42) 踩镲闭': 42,
         '(46) 踩镲开': 46,
         '(49) Crash镲': 49
-      };
-      this._waveMap = {
-        '三角波': 'triangle',
-        '正弦波': 'sine',
-        '方波': 'square',
-        '锯齿波': 'sawtooth'
       };
       this._audioExts = ['.ogg', '.mp3', '.wav'];
 
@@ -165,6 +162,25 @@ var EMBEDDED_SAMPLES = {
             }
           },
           {
+            opcode: 'playNoteVel',
+            blockType: Scratch.BlockType.COMMAND,
+            text: '演奏音符 [NOTE] [DURATION] 拍 力度 [VELOCITY]',
+            arguments: {
+              NOTE: {
+                type: Scratch.ArgumentType.NOTE,
+                defaultValue: 60
+              },
+              DURATION: {
+                type: Scratch.ArgumentType.NUMBER,
+                defaultValue: 0.5
+              },
+              VELOCITY: {
+                type: Scratch.ArgumentType.NUMBER,
+                defaultValue: 64
+              }
+            }
+          },
+          {
             opcode: 'playDrum',
             blockType: Scratch.BlockType.COMMAND,
             text: '演奏拍鼓 [DRUM] [DURATION] 拍',
@@ -210,6 +226,17 @@ var EMBEDDED_SAMPLES = {
             }
           },
           {
+            opcode: 'autoSustainCycle',
+            blockType: Scratch.BlockType.COMMAND,
+            text: '每 [BEATS] 拍自动松踩踏板（0 关闭）',
+            arguments: {
+              BEATS: {
+                type: Scratch.ArgumentType.NUMBER,
+                defaultValue: 4
+              }
+            }
+          },
+          {
             opcode: 'setSustainTime',
             blockType: Scratch.BlockType.COMMAND,
             text: '设置延音 [MODE] 时长为 [SEC] 秒',
@@ -222,30 +249,6 @@ var EMBEDDED_SAMPLES = {
               SEC: {
                 type: Scratch.ArgumentType.NUMBER,
                 defaultValue: 0.5
-              }
-            }
-          },
-          {
-            opcode: 'glideNote',
-            blockType: Scratch.BlockType.COMMAND,
-            text: '从音符 [START] 刮奏到 [END] 时长 [DURATION] 拍 波形 [WAVEFORM]',
-            arguments: {
-              START: {
-                type: Scratch.ArgumentType.NOTE,
-                defaultValue: 60
-              },
-              END: {
-                type: Scratch.ArgumentType.NOTE,
-                defaultValue: 72
-              },
-              DURATION: {
-                type: Scratch.ArgumentType.NUMBER,
-                defaultValue: 1
-              },
-              WAVEFORM: {
-                type: Scratch.ArgumentType.STRING,
-                menu: 'waveformMenu',
-                defaultValue: '三角波'
               }
             }
           },
@@ -305,6 +308,12 @@ var EMBEDDED_SAMPLES = {
             }
           },
           {
+            opcode: 'getSustainState',
+            blockType: Scratch.BlockType.REPORTER,
+            text: '踏板状态',
+            arguments: {}
+          },
+          {
             opcode: 'getMelodyPackName',
             blockType: Scratch.BlockType.REPORTER,
             text: '当前旋律音色名称',
@@ -325,10 +334,6 @@ var EMBEDDED_SAMPLES = {
           sustainTimeMenu: {
             acceptReporters: true,
             items: ['抬起时长', '按下时长']
-          },
-          waveformMenu: {
-            acceptReporters: true,
-            items: ['三角波', '正弦波', '方波', '锯齿波']
           },
           drumMenu: {
             acceptReporters: true,
@@ -370,6 +375,26 @@ var EMBEDDED_SAMPLES = {
 
     _beatsToSeconds(beats) {
       return beats * (60 / this.bpm);
+    }
+
+    // --- 音频网格排程 ---
+    // 每个脚本在线程栈帧上维护一条"排程时间线"(_schedNext)，以音频时钟为准。
+    // 阻塞积木提前 _schedLead 返回，下一块有充裕时间把音频排到精确的未来时刻，
+    // 音符间隔因此不受帧率量化影响（采样级精确）。
+
+    _gridStart(util, now) {
+      var s = util.stackFrame._schedNext;
+      if (typeof s !== 'number' || s < now + 0.005) {
+        s = now + 0.03;   // 网格缺失或已落后（长时间停顿等）→ 重锚
+      }
+      return s;
+    }
+
+    // 推进网格并返回脚本侧应等待的秒数（提前 _schedLead 返回）
+    _gridWait(util, s, dur) {
+      util.stackFrame._schedNext = s + dur;
+      var w = (s - this.audioContext.currentTime) + dur - this._schedLead;
+      return w > 0.005 ? w : 0.005;
     }
 
     // --- Unified blocking helper (auto native yield or Promise fallback) ---
@@ -564,6 +589,7 @@ var EMBEDDED_SAMPLES = {
     // --- Blocking blocks (native stack-timer pattern, no Promises) ---
 
     playNote(args, util) {
+      var self = this;
       var sf = util.stackFrame;
       if (!sf._tStart) {
         var ctx = this._ensureAudioContext();
@@ -571,6 +597,9 @@ var EMBEDDED_SAMPLES = {
         var dur = this._clamp(args.DURATION, 0.01, 100);
         var durationSec = this._beatsToSeconds(dur);
         var now = ctx.currentTime;
+        var startAt = this._gridStart(util, now);        // 精确音频起点（网格）
+        var endAt = startAt + durationSec;               // 精确音频终点
+        var waitSec = this._gridWait(util, startAt, durationSec);
 
         var currentBank = this.melodyBanks.get(this.currentInstrument);
         var sample = currentBank ? this._getBestSample(currentBank, note) : null;
@@ -598,53 +627,186 @@ var EMBEDDED_SAMPLES = {
         }
 
         var vol = this._readThreadVolume(util);
-        gain.gain.setValueAtTime(0.001, now);
-        gain.gain.linearRampToValueAtTime(vol, now + 0.015);
-        source.start(now);
+        gain.gain.setValueAtTime(0.001, startAt);
+        gain.gain.linearRampToValueAtTime(vol, startAt + 0.015);
+        source.start(startAt);
 
         var noteId = this.nextNoteId++;
-        var entry = { source: source, gain: gain, noteId: noteId, note: note };
+        var entry = { source: source, gain: gain, noteId: noteId, note: note, _startedAt: startAt, _schedEnd: endAt };
         this.activeNotes.set(noteId, entry);
 
-        if (this.sustain) {
+        var isSus = this.sustain;
+        if (isSus) {
           entry._sus = true;
-          sf._sustEntry = entry;
         } else {
-          var rel = now + durationSec - 0.05;
-          if (rel < now) rel = now;
+          var rel = endAt - 0.05;
+          if (rel < startAt) rel = startAt;
           gain.gain.setValueAtTime(vol, rel);
-          gain.gain.linearRampToValueAtTime(0, now + durationSec + 0.5);
-          source.stop(now + durationSec + 0.55);
-          sf._noteEntry = entry;
+          gain.gain.linearRampToValueAtTime(0, endAt + 0.5);
+          source.stop(endAt + 0.55);
         }
-        sf._durationSec = durationSec;
+
+        // 完成回调：闭包引用，两种阻塞模式（原生 yield / Promise 降级）通用
+        var finish = function() {
+          self.activeNotes.delete(entry.noteId);
+          if (isSus && !entry._damped) {
+            // 衰减锚定在网格终点（写定拍数结束时刻），不受脚本提前返回影响
+            var sn = (typeof entry._schedEnd === 'number' &&
+                      entry._schedEnd > self.audioContext.currentTime)
+              ? entry._schedEnd
+              : self.audioContext.currentTime;
+            if (self.sustain) {
+              // 琴键松开时踏板仍按住：进入挂起池，靠踏板延音。
+              // 指数慢尾（先快后慢，钢琴弦形态）+ 音高相关（低音悠长、高音清脆）
+              var decayScale = Math.pow(2, (entry.note - 60) / 24);
+              var t = self.sustainPressTime / decayScale;
+              if (t < 0.15) t = 0.15;
+              if (t > 15) t = 15;
+              try {
+                entry.gain.gain.setValueAtTime(entry.gain.gain.value || 0.001, sn);
+                entry.gain.gain.setTargetAtTime(0, sn, t / 3);
+                entry.source.stop(sn + t * 1.2 + 0.1);   // 安全上限：必定终止（含振荡器回退）
+              } catch (e) {}
+              self.sustainedNotes.push(entry);
+            } else {
+              // 琴键松开时踏板已抬起：无制音器托底，直接快速释放
+              var rt = self.sustainReleaseTime;
+              try {
+                entry.gain.gain.setValueAtTime(entry.gain.gain.value || 0.001, sn);
+                entry.gain.gain.setTargetAtTime(0, sn, rt / 4);
+                entry.source.stop(sn + rt + 0.1);
+              } catch (e) {}
+            }
+          }
+          delete sf._finish;
+          delete sf._durationSec;
+        };
+        sf._finish = finish;
+        sf._durationSec = waitSec;
+
+        var r = this._block(util, waitSec);
+        if (r && typeof r.then === 'function') return r.then(finish);
+        if (r) return;
+        finish();
+        return;
       }
 
-      var result = this._block(util, sf._durationSec);
-      if (result) return result;
+      if (this._block(util, sf._durationSec)) return;
+      if (sf._finish) sf._finish();
+    }
 
-      var se = sf._sustEntry;
-      var ne = sf._noteEntry;
-      if (se) {
-        this.activeNotes.delete(se.noteId);
-        // Schedule soft decay using sustainPressTime; if pedal released, cancelScheduledValues overrides
-        var sn = this.audioContext.currentTime;
-        var t = this.sustainPressTime;
-        try {
-          se.gain.gain.setValueAtTime(se.gain.gain.value || vol, sn);
-          se.gain.gain.linearRampToValueAtTime(0, sn + t);
-          se.source.stop(sn + t + 0.05);
-        } catch (e) {}
-        this.sustainedNotes.push(se);
-        delete sf._sustEntry;
-      } else if (ne) {
-        this.activeNotes.delete(ne.noteId);
-        delete sf._noteEntry;
+    playNoteVel(args, util) {
+      var self = this;
+      var sf = util.stackFrame;
+      if (!sf._tStart) {
+        var ctx = this._ensureAudioContext();
+        var note = this._clamp(Math.round(args.NOTE), 0, 127);
+        var dur = this._clamp(args.DURATION, 0.01, 100);
+        var velocity = this._clamp(Math.round(args.VELOCITY), 0, 127);
+        // 力度→增益：平方曲线（MIDI 惯例的近似感知映射），与脚本级音量相乘
+        var velFactor = Math.pow(velocity / 127, 2);
+        var durationSec = this._beatsToSeconds(dur);
+        var now = ctx.currentTime;
+        var startAt = this._gridStart(util, now);        // 精确音频起点（网格）
+        var endAt = startAt + durationSec;               // 精确音频终点
+        var waitSec = this._gridWait(util, startAt, durationSec);
+
+        var currentBank = this.melodyBanks.get(this.currentInstrument);
+        var sample = currentBank ? this._getBestSample(currentBank, note) : null;
+
+        var source, gain;
+        if (sample && sample.buffer) {
+          source = ctx.createBufferSource();
+          source.buffer = sample.buffer;
+          if (sample.baseMidi !== note) {
+            source.playbackRate.value = Math.pow(2, (note - sample.baseMidi) / 12);
+          }
+          gain = ctx.createGain();
+          source.connect(gain);
+          gain.connect(this.masterGain);
+        } else {
+          if (!currentBank || currentBank.size === 0) {
+            console.warn('当前乐器槽位无采样，使用振荡器回退，音符:', note, '乐器:', this.currentInstrument);
+          }
+          source = ctx.createOscillator();
+          source.type = 'triangle';
+          source.frequency.value = this._freqTable[note];
+          gain = ctx.createGain();
+          source.connect(gain);
+          gain.connect(this.masterGain);
+        }
+
+        var vol = this._readThreadVolume(util) * velFactor;
+        gain.gain.setValueAtTime(0.001, startAt);
+        gain.gain.linearRampToValueAtTime(vol, startAt + 0.015);
+        source.start(startAt);
+
+        var noteId = this.nextNoteId++;
+        var entry = { source: source, gain: gain, noteId: noteId, note: note, _startedAt: startAt, _schedEnd: endAt };
+        this.activeNotes.set(noteId, entry);
+
+        var isSus = this.sustain;
+        if (isSus) {
+          entry._sus = true;
+        } else {
+          var rel = endAt - 0.05;
+          if (rel < startAt) rel = startAt;
+          gain.gain.setValueAtTime(vol, rel);
+          gain.gain.linearRampToValueAtTime(0, endAt + 0.5);
+          source.stop(endAt + 0.55);
+        }
+
+        // 完成回调：闭包引用，两种阻塞模式（原生 yield / Promise 降级）通用
+        var finish = function() {
+          self.activeNotes.delete(entry.noteId);
+          if (isSus && !entry._damped) {
+            // 衰减锚定在网格终点（写定拍数结束时刻），不受脚本提前返回影响
+            var sn = (typeof entry._schedEnd === 'number' &&
+                      entry._schedEnd > self.audioContext.currentTime)
+              ? entry._schedEnd
+              : self.audioContext.currentTime;
+            if (self.sustain) {
+              // 琴键松开时踏板仍按住：进入挂起池，靠踏板延音。
+              // 指数慢尾（先快后慢，钢琴弦形态）+ 音高相关（低音悠长、高音清脆）
+              var decayScale = Math.pow(2, (entry.note - 60) / 24);
+              var t = self.sustainPressTime / decayScale;
+              if (t < 0.15) t = 0.15;
+              if (t > 15) t = 15;
+              try {
+                entry.gain.gain.setValueAtTime(entry.gain.gain.value || 0.001, sn);
+                entry.gain.gain.setTargetAtTime(0, sn, t / 3);
+                entry.source.stop(sn + t * 1.2 + 0.1);   // 安全上限：必定终止（含振荡器回退）
+              } catch (e) {}
+              self.sustainedNotes.push(entry);
+            } else {
+              // 琴键松开时踏板已抬起：无制音器托底，直接快速释放
+              var rt = self.sustainReleaseTime;
+              try {
+                entry.gain.gain.setValueAtTime(entry.gain.gain.value || 0.001, sn);
+                entry.gain.gain.setTargetAtTime(0, sn, rt / 4);
+                entry.source.stop(sn + rt + 0.1);
+              } catch (e) {}
+            }
+          }
+          delete sf._finish;
+          delete sf._durationSec;
+        };
+        sf._finish = finish;
+        sf._durationSec = waitSec;
+
+        var r = this._block(util, waitSec);
+        if (r && typeof r.then === 'function') return r.then(finish);
+        if (r) return;
+        finish();
+        return;
       }
-      delete sf._durationSec;
+
+      if (this._block(util, sf._durationSec)) return;
+      if (sf._finish) sf._finish();
     }
 
     playDrum(args, util) {
+      var self = this;
       var sf = util.stackFrame;
       if (!sf._tStart) {
         this._ensureAudioContext();
@@ -666,36 +828,53 @@ var EMBEDDED_SAMPLES = {
         var dur = this._clamp(args.DURATION, 0.01, 100);
         var durationSec = this._beatsToSeconds(dur);
         var now = ctx.currentTime;
+        var startAt = this._gridStart(util, now);
+        var endAt = startAt + durationSec;
+        var waitSec = this._gridWait(util, startAt, durationSec);
 
         var vol = this._readThreadVolume(util);
-        gain.gain.setValueAtTime(0.001, now);
-        gain.gain.linearRampToValueAtTime(vol, now + 0.01);
-        source.start(now);
-        source.stop(now + durationSec + 0.1);
-        gain.gain.setValueAtTime(vol, now + durationSec - 0.05);
-        gain.gain.linearRampToValueAtTime(0, now + durationSec + 0.06);
+        gain.gain.setValueAtTime(0.001, startAt);
+        gain.gain.linearRampToValueAtTime(vol, startAt + 0.01);
+        source.start(startAt);
+        source.stop(endAt + 0.1);
+        gain.gain.setValueAtTime(vol, endAt - 0.05);
+        gain.gain.linearRampToValueAtTime(0, endAt + 0.06);
 
         var noteId = this.nextNoteId++;
-        var entry = { source: source, gain: gain, noteId: noteId, note: midiNote };
+        var entry = { source: source, gain: gain, noteId: noteId, note: midiNote, _schedEnd: endAt };
         this.activeNotes.set(noteId, entry);
-        sf._drumEntry = entry;
-        sf._durationSec = durationSec;
+
+        var finish = function() {
+          self.activeNotes.delete(entry.noteId);
+          delete sf._finish;
+          delete sf._durationSec;
+        };
+        sf._finish = finish;
+        sf._durationSec = waitSec;
+
+        var r = this._block(util, waitSec);
+        if (r && typeof r.then === 'function') return r.then(finish);
+        if (r) return;
+        finish();
+        return;
       }
 
-      var result = this._block(util, sf._durationSec);
-      if (result) return result;
-
-      var de = sf._drumEntry;
-      if (de) {
-        this.activeNotes.delete(de.noteId);
-        delete sf._drumEntry;
-      }
-      delete sf._durationSec;
+      if (this._block(util, sf._durationSec)) return;
+      if (sf._finish) sf._finish();
     }
 
     rest(args, util) {
-      var beats = this._clamp(args.DURATION, 0.01, 100);
-      return this._block(util, this._beatsToSeconds(beats));
+      var sf = util.stackFrame;
+      if (!sf._tStart) {
+        var dur = this._beatsToSeconds(this._clamp(args.DURATION, 0.01, 100));
+        if (this.audioContext) {
+          var s = this._gridStart(util, this.audioContext.currentTime);
+          sf._durationSec = this._gridWait(util, s, dur);   // 休止同样推进网格
+        } else {
+          sf._durationSec = dur;
+        }
+      }
+      return this._block(util, sf._durationSec);
     }
 
     stopAll(args, util) {
@@ -703,6 +882,7 @@ var EMBEDDED_SAMPLES = {
       var entries = this.activeNotes.values();
       for (var entry = entries.next(); !entry.done; entry = entries.next()) {
         var e = entry.value;
+        e._damped = true;
         try {
           e.gain.gain.linearRampToValueAtTime(0, now + 0.05);
           e.source.stop(now + 0.06);
@@ -711,6 +891,7 @@ var EMBEDDED_SAMPLES = {
       this.activeNotes.clear();
       for (var i = 0; i < this.sustainedNotes.length; i++) {
         var s = this.sustainedNotes[i];
+        s._damped = true;
         try {
           s.gain.gain.linearRampToValueAtTime(0, now + 0.05);
           s.source.stop(now + 0.06);
@@ -719,41 +900,111 @@ var EMBEDDED_SAMPLES = {
       this.sustainedNotes = [];
     }
 
+    // 制音。minAgeSec：保护新音头（比该秒数更年轻的音符跳过制音）；
+    // dampSec：本次制音时长（默认用「抬起时长」设置）
+    _dampSustained(minAgeSec, dampSec) {
+      var now = this.audioContext ? this.audioContext.currentTime : 0;
+      var t = (dampSec !== undefined) ? dampSec : this.sustainReleaseTime;
+      var minAge = minAgeSec || 0;
+
+      // 从当前音量开始指数衰减（不跳变）；返回 false 表示被保护、未制音
+      var damp = function(entry) {
+        if (!entry || entry._damped) return true;
+        if (minAge > 0 && typeof entry._startedAt === 'number' &&
+            (now - entry._startedAt) < minAge) {
+          return false;   // 音符太年轻（音头阶段），跳过，避免吞掉音头
+        }
+        entry._damped = true;
+        var g = entry.gain.gain;
+        try {
+          if (typeof g.cancelAndHoldAtTime === 'function') {
+            g.cancelAndHoldAtTime(now);      // 保持当前音量，避免跳变
+          } else {
+            g.cancelScheduledValues(now);
+            g.setValueAtTime(g.value || 0.001, now);
+          }
+          g.setTargetAtTime(0, now, t / 4);  // 指数衰减，接近钢琴制音器手感
+          entry.source.stop(now + t + 0.1);
+        } catch (e) {}
+        return true;
+      };
+
+      // 只制音"琴键已松开"（写定拍数已结束、靠踏板延音）的音符。
+      // 仍在阻挡期内（按谱演奏中）的音符不受踏板换踩影响——
+      // 真钢琴：手按住的键，制音器始终离开该弦，跨小节长音因此天然免疫。
+      var survivors = [];
+      for (var i = 0; i < this.sustainedNotes.length; i++) {
+        if (!damp(this.sustainedNotes[i])) survivors.push(this.sustainedNotes[i]);
+      }
+      this.sustainedNotes = survivors;
+    }
+
     setSustain(args, util) {
       if (args.STATE === '按下') {
         this.sustain = true;
-      } else {
-        this.sustain = false;
-        var now = this.audioContext ? this.audioContext.currentTime : 0;
-
-        var t = this.sustainReleaseTime;
-
-        // Stop sustained notes (past their blocking time)
-        for (var i = 0; i < this.sustainedNotes.length; i++) {
-          var entry = this.sustainedNotes[i];
-          try {
-            entry.gain.gain.cancelScheduledValues(now);
-            entry.gain.gain.setValueAtTime(entry.gain.gain.value || 0.001, now);
-            entry.gain.gain.linearRampToValueAtTime(0, now + t);
-            entry.source.stop(now + t + 0.05);
-          } catch (e) {}
-        }
-        this.sustainedNotes = [];
-
-        // Also stop sustain-mode notes still in their blocking time
-        var entries = this.activeNotes.values();
-        for (var entry2 = entries.next(); !entry2.done; entry2 = entries.next()) {
-          var e = entry2.value;
-          if (e._sus) {
-            try {
-              e.gain.gain.cancelScheduledValues(now);
-              e.gain.gain.setValueAtTime(e.gain.gain.value || 0.001, now);
-              e.gain.gain.linearRampToValueAtTime(0, now + t);
-              e.source.stop(now + t + 0.05);
-            } catch (ex) {}
-          }
-        }
+        return;
       }
+      this.sustain = false;
+      this._dampSustained();
+    }
+
+    _cancelAutoCycle() {
+      if (this._autoCycleTimer) {
+        clearTimeout(this._autoCycleTimer);
+        this._autoCycleTimer = null;
+      }
+    }
+
+    autoSustainCycle(args, util) {
+      var self = this;
+      this._cancelAutoCycle();
+
+      var beats = this._clamp(args.BEATS, 0, 64);
+      if (beats <= 0) {
+        console.log('[增强音乐] 自动松踩踏板已关闭');
+        return;
+      }
+
+      // 程序结束（脚本全部结束 / 停止按钮 / 重新开始）时自动清除循环
+      if (!this._stopHookInstalled && util.runtime && typeof util.runtime.on === 'function') {
+        this._stopHookInstalled = true;
+        util.runtime.on('PROJECT_RUN_STOP', function() { self._cancelAutoCycle(); });
+        util.runtime.on('PROJECT_STOP_ALL', function() { self._cancelAutoCycle(); });
+        util.runtime.on('PROJECT_START', function() { self._cancelAutoCycle(); });
+      }
+
+      var intervalMs = function() { return self._beatsToSeconds(beats) * 1000; };
+      var nextAt = performance.now() + intervalMs();
+
+      var tick = function() {
+        // 漂移补偿：按绝对时间点安排下一次
+        var nowMs = performance.now();
+        nextAt += intervalMs();
+        if (nextAt <= nowMs) nextAt = nowMs + intervalMs();
+        self._autoCycleTimer = setTimeout(tick, nextAt - nowMs);
+
+        if (!self.sustain) return;   // 踏板未按下时仅空转
+
+        // 换踏板。所有时长按周期缩放，高 BPM 下不会出现"整段音符落在换踩间隙里"：
+        //   保护窗 = 1.3×周期（留 30% 余量，避免音符出生网格压在边界上被抖动误判）
+        //   制音时长 ≤ 0.15×周期（且 ≤0.1s）：换踩节奏越快，落弦越利落
+        //   换踩间隙 ≤ 0.15×周期（且 ≤120ms）：间隙压缩到周期的零头
+        var cycleSec = intervalMs() / 1000;
+        self.sustain = false;
+        self._dampSustained(
+          cycleSec * 1.3,
+          Math.min(self.sustainReleaseTime, 0.1, cycleSec * 0.15)
+        );
+
+        // 踩：间隙过后重新按下（循环仍激活才重踩）
+        var gapMs = Math.min(120, intervalMs() * 0.15);
+        setTimeout(function() {
+          if (self._autoCycleTimer !== null) self.sustain = true;
+        }, gapMs);
+      };
+
+      this._autoCycleTimer = setTimeout(tick, intervalMs());
+      console.log('[增强音乐] 自动松踩踏板：每 ' + beats + ' 拍松踩一次');
     }
 
     setSustainTime(args, util) {
@@ -763,62 +1014,6 @@ var EMBEDDED_SAMPLES = {
       } else {
         this.sustainPressTime = sec;
       }
-    }
-
-    glideNote(args, util) {
-      var sf = util.stackFrame;
-      if (!sf._tStart) {
-        var ctx = this._ensureAudioContext();
-        var startNote = this._clamp(Math.round(args.START), 0, 127);
-        var endNote = this._clamp(Math.round(args.END), 0, 127);
-        var dur = this._clamp(args.DURATION, 0.01, 100);
-        var durationSec = this._beatsToSeconds(dur);
-        var direction = startNote <= endNote ? 1 : -1;
-        var totalSteps = endNote - startNote;
-        if (direction < 0) totalSteps = -totalSteps;
-
-        if (totalSteps === 0) return;
-
-        var waveType = this._waveMap[args.WAVEFORM] || 'triangle';
-        var stepIntervalSec = durationSec / totalSteps;
-        var currentBank = this.melodyBanks.get(this.currentInstrument);
-        var vol = this._readThreadVolume(util) * 0.6;
-        var freqTable = this._freqTable;
-        var masterGain = this.masterGain;
-
-        var baseTime = ctx.currentTime;
-        for (var step = 0; step <= totalSteps; step++) {
-          var note = startNote + direction * step;
-          var sample = currentBank ? this._getBestSample(currentBank, note) : null;
-          var t = baseTime + step * stepIntervalSec;
-          var noteEnd = t + stepIntervalSec + 0.08;
-
-          var source, gain;
-          if (sample && sample.buffer) {
-            source = ctx.createBufferSource();
-            source.buffer = sample.buffer;
-            if (sample.baseMidi !== note) {
-              source.playbackRate.value = Math.pow(2, (note - sample.baseMidi) / 12);
-            }
-          } else {
-            source = ctx.createOscillator();
-            source.type = waveType;
-            source.frequency.value = freqTable[note] || 440;
-          }
-          gain = ctx.createGain();
-          gain.gain.setValueAtTime(0.001, t);
-          gain.gain.linearRampToValueAtTime(vol, t + 0.01);
-          gain.gain.linearRampToValueAtTime(0, noteEnd);
-          source.connect(gain);
-          gain.connect(masterGain);
-          source.start(t);
-          source.stop(noteEnd + 0.05);
-        }
-
-        sf._durationSec = durationSec + 0.08;
-      }
-
-      return this._block(util, sf._durationSec);
     }
 
     _readThreadVolume(util) {
@@ -848,6 +1043,10 @@ var EMBEDDED_SAMPLES = {
 
     changeTempo(args, util) {
       this.bpm = this._clamp(this.bpm + args.DELTA, 20, 500);
+    }
+
+    getSustainState(args, util) {
+      return this.sustain ? '按下' : '抬起';
     }
 
     getMelodyPackName(args, util) {
