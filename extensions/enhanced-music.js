@@ -117,6 +117,8 @@ var EMBEDDED_SAMPLES = {
       return {
         id: 'enhancedMusic',
         name: '增强音乐',
+        color1: '#6C5CE7',
+        color2: '#00B4D8',
         blocks: [
           {
             opcode: 'loadMelodySamples',
