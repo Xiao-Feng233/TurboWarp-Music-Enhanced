@@ -58,7 +58,7 @@ var EMBEDDED_SAMPLES = {
       this._loadEmbeddedSamples();
 
       // 暴露实例，供钢琴预览等外部逻辑访问
-      window.__enhancedMusicInstance = this;
+      if (typeof window !== 'undefined') window.__enhancedMusicInstance = this;
     }
 
     _loadEmbeddedSamples() {
@@ -1059,9 +1059,14 @@ var EMBEDDED_SAMPLES = {
   }
 
   function tryRegister() {
-    if (window.Scratch && Scratch.extensions && typeof Scratch.extensions.register === 'function') {
-      Scratch.extensions.register(new EnhancedMusic());
-      console.log('[增强音乐] 扩展已内置注册');
+    // 环境无关注册：词法作用域 Scratch（Gandi 注入式）优先，window/self 兜底（TurboWarp 桌面端）
+    var S = null;
+    try { if (typeof Scratch !== 'undefined' && Scratch && Scratch.extensions) S = Scratch; } catch (e) {}
+    if (!S && typeof window !== 'undefined' && window.Scratch && window.Scratch.extensions) S = window.Scratch;
+    if (!S && typeof self !== 'undefined' && self.Scratch && self.Scratch.extensions) S = self.Scratch;
+    if (S && typeof S.extensions.register === 'function') {
+      S.extensions.register(new EnhancedMusic());
+      console.log('[增强音乐] 扩展已注册');
       return true;
     }
     return false;
