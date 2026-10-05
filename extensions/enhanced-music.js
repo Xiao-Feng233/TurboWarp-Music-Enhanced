@@ -49,6 +49,12 @@ var EMBEDDED_SAMPLES = {
         '(46) 踩镲开': 46,
         '(49) Crash镲': 49
       };
+      this._waveMap = {
+        '三角波': 'triangle',
+        '正弦波': 'sine',
+        '方波': 'square',
+        '锯齿波': 'sawtooth'
+      };
       this._audioExts = ['.ogg', '.mp3', '.wav'];
 
       this._freqTable = new Array(128);
@@ -177,6 +183,30 @@ var EMBEDDED_SAMPLES = {
               VELOCITY: {
                 type: Scratch.ArgumentType.NUMBER,
                 defaultValue: 64
+              }
+            }
+          },
+          {
+            opcode: 'glideNote',
+            blockType: Scratch.BlockType.COMMAND,
+            text: '从音符 [START] 刮奏到 [END] 时长 [DURATION] 拍 波形 [WAVEFORM]',
+            arguments: {
+              START: {
+                type: Scratch.ArgumentType.NOTE,
+                defaultValue: 60
+              },
+              END: {
+                type: Scratch.ArgumentType.NOTE,
+                defaultValue: 72
+              },
+              DURATION: {
+                type: Scratch.ArgumentType.NUMBER,
+                defaultValue: 1
+              },
+              WAVEFORM: {
+                type: Scratch.ArgumentType.STRING,
+                menu: 'waveformMenu',
+                defaultValue: '三角波'
               }
             }
           },
@@ -334,6 +364,10 @@ var EMBEDDED_SAMPLES = {
           sustainTimeMenu: {
             acceptReporters: true,
             items: ['抬起时长', '按下时长']
+          },
+          waveformMenu: {
+            acceptReporters: true,
+            items: ['三角波', '正弦波', '方波', '锯齿波']
           },
           drumMenu: {
             acceptReporters: true,
@@ -803,6 +837,92 @@ var EMBEDDED_SAMPLES = {
 
       if (this._block(util, sf._durationSec)) return;
       if (sf._finish) sf._finish();
+    }
+
+    glideNote(args, util) {
+      var self = this;
+      var sf = util.stackFrame;
+      if (!sf._tStart) {
+        var ctx = this._ensureAudioContext();
+        var startNote = this._clamp(Math.round(args.START), 0, 127);
+        var endNote = this._clamp(Math.round(args.END), 0, 127);
+        var dur = this._clamp(args.DURATION, 0.01, 100);
+        var durationSec = this._beatsToSeconds(dur);
+        var waveType = this._waveMap[args.WAVEFORM] || 'triangle';
+        var stepCount = Math.abs(endNote - startNote);
+        var direction = endNote >= startNote ? 1 : -1;
+        if (stepCount === 0) { stepCount = 1; direction = 0; }   // 同音：长音撑满时长
+        var stepIntervalSec = durationSec / stepCount;
+
+        var currentBank = this.melodyBanks.get(this.currentInstrument);
+        var vol = this._readThreadVolume(util) * 0.6;
+        var origin = this._gridStart(util, ctx.currentTime);
+        sf._durationSec = this._gridWait(util, origin, durationSec);   // 精确时长（旧版 bug：多等 0.08s）
+
+        var isSus = this.sustain;
+        for (var step = 0; step <= stepCount; step++) {
+          var note = startNote + direction * step;
+          var t = origin + step * stepIntervalSec;
+          var endAt = t + stepIntervalSec;
+          var sample = currentBank ? this._getBestSample(currentBank, note) : null;
+          var source, gain;
+          if (sample && sample.buffer) {
+            source = ctx.createBufferSource();
+            source.buffer = sample.buffer;
+            if (sample.baseMidi !== note) {
+              source.playbackRate.value = Math.pow(2, (note - sample.baseMidi) / 12);
+            }
+          } else {
+            source = ctx.createOscillator();
+            source.type = waveType;
+            source.frequency.value = this._freqTable[note] || 440;
+          }
+          gain = ctx.createGain();
+          gain.gain.setValueAtTime(0.001, t);
+          gain.gain.linearRampToValueAtTime(vol, t + 0.012);
+          source.connect(gain);
+          gain.connect(this.masterGain);
+          source.start(t);
+
+          var noteId = this.nextNoteId++;
+          var entry = { source: source, gain: gain, noteId: noteId, note: note, _startedAt: t, _schedEnd: endAt };
+          this.activeNotes.set(noteId, entry);
+          (function(en) {
+            en.source.onended = function() {
+              self.activeNotes.delete(en.noteId);
+              var ix = self.sustainedNotes.indexOf(en);
+              if (ix >= 0) self.sustainedNotes.splice(ix, 1);
+            };
+          })(entry);
+
+          if (isSus) {
+            // 踏板按住（旧版 bug：完全不受踏板影响）：每步"松开"接入踏板延音，可被换踩/自动松踩制音
+            entry._sus = true;
+            var decayScale = Math.pow(2, (note - 60) / 24);
+            var tail = self.sustainPressTime / decayScale;
+            if (tail < 0.15) tail = 0.15;
+            if (tail > 15) tail = 15;
+            gain.gain.setValueAtTime(vol, endAt);
+            gain.gain.setTargetAtTime(0, endAt, tail / 3);
+            source.stop(endAt + tail * 1.2 + 0.1);
+            (function(en, sn) {
+              setTimeout(function() {
+                if (!en._damped && !en._susDone) {
+                  en._susDone = 1;
+                  self.sustainedNotes.push(en);   // 琴键松开时刻入池（未来的音符不会被换踩误杀）
+                }
+              }, Math.max(0, (sn - self.audioContext.currentTime) * 1000));
+            })(entry, endAt);
+          } else {
+            // 无踏板：步长相关的短尾衔接（避免每步 0.5s 长尾糊成一片）
+            var tailSec = Math.max(0.04, Math.min(0.3, stepIntervalSec * 2.5));
+            gain.gain.setValueAtTime(vol, endAt);
+            gain.gain.linearRampToValueAtTime(0, endAt + tailSec);
+            source.stop(endAt + tailSec + 0.05);
+          }
+        }
+      }
+      return this._block(util, sf._durationSec);
     }
 
     playDrum(args, util) {
